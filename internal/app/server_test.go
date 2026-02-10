@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -25,22 +26,18 @@ func TestRateLimitedRoutesAcrossAlgorithms(t *testing.T) {
 	for _, algorithm := range algorithms {
 		t.Run(string(algorithm), func(t *testing.T) {
 			vc := chronoclock.NewVirtualClock(time.Date(2026, 2, 8, 10, 0, 0, 0, time.UTC))
-			cfg := Config{
-				Algorithm: algorithm,
-				Rate:      2,
-				Window:    time.Minute,
-				Burst:     2,
-				Addr:      ":0",
-			}
+			cfg := mustTestConfig(algorithm)
 
-			lim, err := NewLimiter(cfg, vc)
+			mainLimiter, mainStorage, err := NewStorageBackedLimiter(cfg, vc)
 			if err != nil {
-				t.Fatalf("NewLimiter() error = %v", err)
+				t.Fatalf("NewStorageBackedLimiter() error = %v", err)
 			}
+			defer mainStorage.Close()
 
-			rec := chronorecorder.New(nil)
-			store := chronostorage.NewMemoryStorage(vc)
-			handler := NewHandler(lim, vc, rec, store)
+			storageSet, cleanup := newMemoryOnlyStorageSet(t, cfg, vc)
+			defer cleanup()
+
+			handler := NewHandler(cfg, mainLimiter, vc, chronorecorder.New(nil), storageSet)
 
 			assertPublicRoutes(t, handler)
 
@@ -63,28 +60,32 @@ func TestRateLimitedRoutesAcrossAlgorithms(t *testing.T) {
 			respOtherKey := executeRequest(handler, http.MethodGet, "/api/profile", "client-b", "", "", "198.51.100.2:4000")
 			assertStatus(t, respOtherKey, http.StatusOK)
 			assertRateLimitHeadersPresent(t, respOtherKey)
+
+			for _, p := range []string{"/api/token-bucket", "/api/sliding-window", "/api/fixed-window"} {
+				resp := executeRequest(handler, http.MethodGet, p, "algo-key", "", "", "198.51.100.2:4000")
+				if resp.Code != http.StatusOK && resp.Code != http.StatusTooManyRequests {
+					t.Fatalf("unexpected status for %s: %d", p, resp.Code)
+				}
+			}
 		})
 	}
 }
 
 func TestRateLimitKeyFallsBackToClientIP(t *testing.T) {
 	vc := chronoclock.NewVirtualClock(time.Date(2026, 2, 8, 10, 0, 0, 0, time.UTC))
-	cfg := Config{
-		Algorithm: limiter.AlgorithmFixedWindow,
-		Rate:      1,
-		Window:    time.Minute,
-		Burst:     1,
-		Addr:      ":0",
-	}
+	cfg := mustTestConfig(limiter.AlgorithmFixedWindow)
+	cfg.Rate = 1
 
-	lim, err := NewLimiter(cfg, vc)
+	mainLimiter, mainStorage, err := NewStorageBackedLimiter(cfg, vc)
 	if err != nil {
-		t.Fatalf("NewLimiter() error = %v", err)
+		t.Fatalf("NewStorageBackedLimiter() error = %v", err)
 	}
+	defer mainStorage.Close()
 
-	rec := chronorecorder.New(nil)
-	store := chronostorage.NewMemoryStorage(vc)
-	handler := NewHandler(lim, vc, rec, store)
+	storageSet, cleanup := newMemoryOnlyStorageSet(t, cfg, vc)
+	defer cleanup()
+
+	handler := NewHandler(cfg, mainLimiter, vc, chronorecorder.New(nil), storageSet)
 
 	resp1 := executeRequest(handler, http.MethodGet, "/api/profile", "", "198.51.100.10", "", "203.0.113.1:8080")
 	assertStatus(t, resp1, http.StatusOK)
@@ -95,6 +96,88 @@ func TestRateLimitKeyFallsBackToClientIP(t *testing.T) {
 
 	resp3 := executeRequest(handler, http.MethodGet, "/api/profile", "", "198.51.100.11", "", "203.0.113.1:8080")
 	assertStatus(t, resp3, http.StatusOK)
+}
+
+func TestStorageCompareIncludesAllBackends(t *testing.T) {
+	vc := chronoclock.NewVirtualClock(time.Date(2026, 2, 8, 10, 0, 0, 0, time.UTC))
+	cfg := mustTestConfig(limiter.AlgorithmFixedWindow)
+
+	mainLimiter, mainStorage, err := NewStorageBackedLimiter(cfg, vc)
+	if err != nil {
+		t.Fatalf("NewStorageBackedLimiter() error = %v", err)
+	}
+	defer mainStorage.Close()
+
+	storageSet, cleanup := newMemoryOnlyStorageSet(t, cfg, vc)
+	defer cleanup()
+
+	handler := NewHandler(cfg, mainLimiter, vc, chronorecorder.New(nil), storageSet)
+	resp := executeRequest(handler, http.MethodGet, "/api/storage/compare", "compare-key", "", "", "198.51.100.90:8080")
+	assertStatus(t, resp, http.StatusOK)
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal compare response: %v", err)
+	}
+	results, ok := body["results"].(map[string]any)
+	if !ok {
+		t.Fatalf("results missing or wrong type: %T", body["results"])
+	}
+	if _, ok := results["memory"]; !ok {
+		t.Fatal("compare response missing memory result")
+	}
+	if _, ok := results["redis"]; !ok {
+		t.Fatal("compare response missing redis result")
+	}
+	if _, ok := results["crdt"]; !ok {
+		t.Fatal("compare response missing crdt result")
+	}
+}
+
+func mustTestConfig(algorithm limiter.Algorithm) Config {
+	return Config{
+		Addr:           ":0",
+		Algorithm:      algorithm,
+		Rate:           2,
+		Window:         time.Minute,
+		Burst:          2,
+		StorageBackend: chronostorage.BackendMemory,
+		Storage: chronostorage.Config{
+			Backend: chronostorage.BackendMemory,
+			Memory: &chronostorage.MemoryConfig{
+				CleanupInterval: time.Minute,
+				Algorithm:       string(algorithm),
+				Burst:           2,
+			},
+		},
+	}
+}
+
+func newMemoryOnlyStorageSet(t *testing.T, cfg Config, clk chronoclock.Clock) (*StorageLimiterSet, func()) {
+	t.Helper()
+
+	memoryCfg := cfg.Storage
+	memoryCfg.Backend = chronostorage.BackendMemory
+	injectClockIntoStorageConfig(&memoryCfg, clk)
+
+	memStore, err := chronostorage.NewStorage(memoryCfg)
+	if err != nil {
+		t.Fatalf("NewStorage(memory) error = %v", err)
+	}
+
+	memLimiter, err := limiter.NewStorageLimiter(memStore, cfg.Rate, cfg.Window, clk)
+	if err != nil {
+		_ = memStore.Close()
+		t.Fatalf("NewStorageLimiter(memory) error = %v", err)
+	}
+
+	set := &StorageLimiterSet{
+		Memory:      memLimiter,
+		memoryStore: memStore,
+		RedisErr:    fmt.Errorf("redis not configured in test"),
+		CRDTErr:     fmt.Errorf("crdt not configured in test"),
+	}
+	return set, func() { _ = set.Close() }
 }
 
 func assertPublicRoutes(t *testing.T, handler http.Handler) {

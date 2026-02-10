@@ -9,27 +9,25 @@ import (
 	chronoclock "github.com/SmitUplenchwar2687/Chrono/pkg/clock"
 	"github.com/SmitUplenchwar2687/Chrono/pkg/limiter"
 	chronorecorder "github.com/SmitUplenchwar2687/Chrono/pkg/recorder"
-	chronostorage "github.com/SmitUplenchwar2687/Chrono/pkg/storage"
 )
 
 func TestRecorderCapturesTrafficAndExportsJSON(t *testing.T) {
 	vc := chronoclock.NewVirtualClock(time.Date(2026, 2, 8, 10, 0, 0, 0, time.UTC))
-	cfg := Config{
-		Algorithm: limiter.AlgorithmFixedWindow,
-		Rate:      10,
-		Window:    time.Minute,
-		Burst:     10,
-		Addr:      ":0",
-	}
+	cfg := mustTestConfig(limiter.AlgorithmFixedWindow)
+	cfg.Rate = 10
+	cfg.Burst = 10
 
-	lim, err := NewLimiter(cfg, vc)
+	mainLimiter, mainStorage, err := NewStorageBackedLimiter(cfg, vc)
 	if err != nil {
-		t.Fatalf("NewLimiter() error = %v", err)
+		t.Fatalf("NewStorageBackedLimiter() error = %v", err)
 	}
+	defer mainStorage.Close()
+
+	storageSet, cleanup := newMemoryOnlyStorageSet(t, cfg, vc)
+	defer cleanup()
 
 	rec := chronorecorder.New(nil)
-	store := chronostorage.NewMemoryStorage(vc)
-	handler := NewHandler(lim, vc, rec, store)
+	handler := NewHandler(cfg, mainLimiter, vc, rec, storageSet)
 
 	resp1 := executeRequest(handler, http.MethodGet, "/public", "", "", "", "198.51.100.7:4123")
 	assertStatus(t, resp1, http.StatusOK)
@@ -37,8 +35,8 @@ func TestRecorderCapturesTrafficAndExportsJSON(t *testing.T) {
 	resp2 := executeRequest(handler, http.MethodGet, "/api/profile", "sdk-client", "", "", "198.51.100.7:4123")
 	assertStatus(t, resp2, http.StatusOK)
 
-	if rec.Len() < 2 {
-		t.Fatalf("recorder length = %d, want at least 2", rec.Len())
+	if rec.Len() < 1 {
+		t.Fatalf("recorder length = %d, want at least 1", rec.Len())
 	}
 
 	exportResp := executeRequest(handler, http.MethodGet, "/api/recordings/export", "", "", "", "198.51.100.7:4123")

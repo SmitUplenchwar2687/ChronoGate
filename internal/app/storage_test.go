@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -10,79 +9,65 @@ import (
 	chronoclock "github.com/SmitUplenchwar2687/Chrono/pkg/clock"
 	"github.com/SmitUplenchwar2687/Chrono/pkg/limiter"
 	chronorecorder "github.com/SmitUplenchwar2687/Chrono/pkg/recorder"
-	chronostorage "github.com/SmitUplenchwar2687/Chrono/pkg/storage"
 )
 
-func TestMemoryStorageExpiration(t *testing.T) {
+func TestStorageMemoryEndpointRateLimit(t *testing.T) {
 	vc := chronoclock.NewVirtualClock(time.Date(2026, 2, 8, 12, 0, 0, 0, time.UTC))
-	store := chronostorage.NewMemoryStorage(vc)
+	cfg := mustTestConfig(limiter.AlgorithmFixedWindow)
+	cfg.Rate = 1
 
-	if err := store.Set(context.Background(), "feature", []byte("enabled"), 2*time.Second); err != nil {
-		t.Fatalf("Set() error = %v", err)
-	}
-
-	value, err := store.Get(context.Background(), "feature")
+	mainLimiter, mainStorage, err := NewStorageBackedLimiter(cfg, vc)
 	if err != nil {
-		t.Fatalf("Get() error = %v", err)
+		t.Fatalf("NewStorageBackedLimiter() error = %v", err)
 	}
-	if string(value) != "enabled" {
-		t.Fatalf("Get() = %q, want enabled", string(value))
+	defer mainStorage.Close()
+
+	storageSet, cleanup := newMemoryOnlyStorageSet(t, cfg, vc)
+	defer cleanup()
+
+	handler := NewHandler(cfg, mainLimiter, vc, chronorecorder.New(nil), storageSet)
+
+	resp1 := executeRequest(handler, http.MethodGet, "/api/storage/memory", "storage-key", "", "", "198.51.100.21:5000")
+	if resp1.Code != http.StatusOK && resp1.Code != http.StatusTooManyRequests {
+		t.Fatalf("unexpected status: %d", resp1.Code)
 	}
 
-	vc.Advance(3 * time.Second)
-
-	expiredValue, err := store.Get(context.Background(), "feature")
-	if err != nil {
-		t.Fatalf("Get() after expiry error = %v", err)
-	}
-	if expiredValue != nil {
-		t.Fatalf("value after expiry = %q, want nil", string(expiredValue))
-	}
+	resp2 := executeRequest(handler, http.MethodGet, "/api/storage/memory", "storage-key", "", "", "198.51.100.21:5000")
+	assertStatus(t, resp2, http.StatusTooManyRequests)
 }
 
-func TestStorageDemoEndpointReadWriteExpiry(t *testing.T) {
+func TestStorageCompareCRDTNotePresent(t *testing.T) {
 	vc := chronoclock.NewVirtualClock(time.Date(2026, 2, 8, 12, 0, 0, 0, time.UTC))
-	cfg := Config{
-		Algorithm: limiter.AlgorithmTokenBucket,
-		Rate:      10,
-		Window:    time.Minute,
-		Burst:     10,
-		Addr:      ":0",
-	}
+	cfg := mustTestConfig(limiter.AlgorithmFixedWindow)
 
-	lim, err := NewLimiter(cfg, vc)
+	mainLimiter, mainStorage, err := NewStorageBackedLimiter(cfg, vc)
 	if err != nil {
-		t.Fatalf("NewLimiter() error = %v", err)
+		t.Fatalf("NewStorageBackedLimiter() error = %v", err)
+	}
+	defer mainStorage.Close()
+
+	storageSet, cleanup := newMemoryOnlyStorageSet(t, cfg, vc)
+	defer cleanup()
+
+	handler := NewHandler(cfg, mainLimiter, vc, chronorecorder.New(nil), storageSet)
+	resp := executeRequest(handler, http.MethodGet, "/api/storage/compare", "cmp-user", "", "", "198.51.100.21:5000")
+	assertStatus(t, resp, http.StatusOK)
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode compare response: %v", err)
 	}
 
-	rec := chronorecorder.New(nil)
-	store := chronostorage.NewMemoryStorage(vc)
-	handler := NewHandler(lim, vc, rec, store)
-
-	writeResp := executeRequest(handler, http.MethodPut, "/api/storage/demo", "", "", `{"key":"demo","value":"on","ttl":"1s"}`, "198.51.100.21:5000")
-	assertStatus(t, writeResp, http.StatusOK)
-
-	readResp := executeRequest(handler, http.MethodGet, "/api/storage/demo?key=demo", "", "", "", "198.51.100.21:5000")
-	assertStatus(t, readResp, http.StatusOK)
-
-	var readBody map[string]any
-	if err := json.Unmarshal(readResp.Body.Bytes(), &readBody); err != nil {
-		t.Fatalf("decode read response: %v", err)
+	results, ok := body["results"].(map[string]any)
+	if !ok {
+		t.Fatalf("results has wrong type: %T", body["results"])
 	}
-	if exists, ok := readBody["exists"].(bool); !ok || !exists {
-		t.Fatalf("exists = %v, want true", readBody["exists"])
+	crdt, ok := results["crdt"].(map[string]any)
+	if !ok {
+		t.Fatalf("crdt has wrong type: %T", results["crdt"])
 	}
-
-	vc.Advance(2 * time.Second)
-
-	expiredResp := executeRequest(handler, http.MethodGet, "/api/storage/demo?key=demo", "", "", "", "198.51.100.21:5000")
-	assertStatus(t, expiredResp, http.StatusOK)
-
-	var expiredBody map[string]any
-	if err := json.Unmarshal(expiredResp.Body.Bytes(), &expiredBody); err != nil {
-		t.Fatalf("decode expired response: %v", err)
-	}
-	if exists, ok := expiredBody["exists"].(bool); !ok || exists {
-		t.Fatalf("exists after expiry = %v, want false", expiredBody["exists"])
+	note, _ := crdt["note"].(string)
+	if note == "" {
+		t.Fatal("expected crdt compare note to be present")
 	}
 }

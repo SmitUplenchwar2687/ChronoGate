@@ -9,31 +9,67 @@ import (
 
 	chronoconfig "github.com/SmitUplenchwar2687/Chrono/pkg/config"
 	"github.com/SmitUplenchwar2687/Chrono/pkg/limiter"
+	chronostorage "github.com/SmitUplenchwar2687/Chrono/pkg/storage"
 )
 
-// Config holds ChronoGate runtime settings parsed from environment variables.
+// Config is ChronoGate runtime configuration resolved from Chrono config file + env.
 type Config struct {
+	ConfigPath string
+
+	Addr      string
 	Algorithm limiter.Algorithm
 	Rate      int
 	Window    time.Duration
 	Burst     int
-	Addr      string
+
+	StorageBackend string
+	Storage        chronostorage.Config
 }
 
-// LoadConfigFromEnv loads runtime config using Chrono's public config defaults,
-// then applies env var overrides for ChronoGate.
-func LoadConfigFromEnv() (Config, error) {
-	base := chronoconfig.Default()
-	cfg := Config{
-		Algorithm: base.Limiter.Algorithm,
-		Rate:      base.Limiter.Rate,
-		Window:    base.Limiter.Window,
-		Burst:     base.Limiter.Burst,
-		Addr:      base.Server.Addr,
+// LoadConfig resolves configuration from Chrono defaults, optional config file,
+// and environment overrides.
+func LoadConfig(configPath string) (Config, error) {
+	chronoCfg := chronoconfig.Default()
+	if strings.TrimSpace(configPath) != "" {
+		loaded, err := chronoconfig.LoadFile(configPath)
+		if err != nil {
+			return Config{}, fmt.Errorf("load config file: %w", err)
+		}
+		chronoCfg = loaded
 	}
 
+	if err := chronoCfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("validate chrono config: %w", err)
+	}
+
+	cfg := Config{
+		ConfigPath: configPath,
+		Addr:       chronoCfg.Server.Addr,
+		Algorithm:  chronoCfg.Limiter.Algorithm,
+		Rate:       chronoCfg.Limiter.Rate,
+		Window:     chronoCfg.Limiter.Window,
+		Burst:      chronoCfg.Limiter.Burst,
+		StorageBackend: func() string {
+			if chronoCfg.Storage.Backend == "" {
+				return chronostorage.BackendMemory
+			}
+			return chronoCfg.Storage.Backend
+		}(),
+		Storage: toStorageConfig(chronoCfg),
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("ADDR")); raw != "" {
+		cfg.Addr = raw
+	}
 	if raw := strings.TrimSpace(os.Getenv("ALGORITHM")); raw != "" {
 		cfg.Algorithm = limiter.Algorithm(raw)
+	}
+	if raw := strings.TrimSpace(os.Getenv("WINDOW")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid WINDOW %q: %w", raw, err)
+		}
+		cfg.Window = d
 	}
 
 	var err error
@@ -41,22 +77,14 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-
 	cfg.Burst, err = parsePositiveIntEnv("BURST", cfg.Burst)
 	if err != nil {
 		return Config{}, err
 	}
 
-	if raw := strings.TrimSpace(os.Getenv("WINDOW")); raw != "" {
-		window, parseErr := time.ParseDuration(raw)
-		if parseErr != nil {
-			return Config{}, fmt.Errorf("invalid WINDOW %q: %w", raw, parseErr)
-		}
-		cfg.Window = window
-	}
-
-	if raw := strings.TrimSpace(os.Getenv("ADDR")); raw != "" {
-		cfg.Addr = raw
+	if raw := strings.TrimSpace(os.Getenv("STORAGE_BACKEND")); raw != "" {
+		cfg.StorageBackend = raw
+		cfg.Storage.Backend = raw
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -66,12 +94,61 @@ func LoadConfigFromEnv() (Config, error) {
 	return cfg, nil
 }
 
-// Validate checks configuration values.
+func toStorageConfig(c chronoconfig.Config) chronostorage.Config {
+	backend := c.Storage.Backend
+	if backend == "" {
+		backend = chronostorage.BackendMemory
+	}
+
+	memoryCfg := &chronostorage.MemoryConfig{
+		CleanupInterval: c.Storage.Memory.CleanupInterval,
+		Algorithm:       c.Storage.Memory.Algorithm,
+		Burst:           c.Storage.Memory.Burst,
+	}
+	if memoryCfg.CleanupInterval <= 0 {
+		memoryCfg.CleanupInterval = time.Minute
+	}
+
+	redisCfg := &chronostorage.RedisConfig{
+		Host:         c.Storage.Redis.Host,
+		Port:         c.Storage.Redis.Port,
+		Password:     c.Storage.Redis.Password,
+		DB:           c.Storage.Redis.DB,
+		Cluster:      c.Storage.Redis.Cluster,
+		ClusterNodes: append([]string(nil), c.Storage.Redis.ClusterNodes...),
+		PoolSize:     c.Storage.Redis.PoolSize,
+		MaxRetries:   c.Storage.Redis.MaxRetries,
+		DialTimeout:  c.Storage.Redis.DialTimeout,
+	}
+
+	crdtCfg := &chronostorage.CRDTConfig{
+		NodeID:         c.Storage.CRDT.NodeID,
+		BindAddr:       c.Storage.CRDT.BindAddr,
+		Peers:          append([]string(nil), c.Storage.CRDT.Peers...),
+		GossipInterval: c.Storage.CRDT.GossipInterval,
+	}
+
+	if crdtCfg.NodeID == "" {
+		crdtCfg.NodeID = "chronogate-crdt"
+	}
+	if crdtCfg.BindAddr == "" {
+		crdtCfg.BindAddr = "127.0.0.1:0"
+	}
+
+	return chronostorage.Config{
+		Backend: backend,
+		Memory:  memoryCfg,
+		Redis:   redisCfg,
+		CRDT:    crdtCfg,
+	}
+}
+
+// Validate checks app-level configuration.
 func (c Config) Validate() error {
 	switch c.Algorithm {
 	case limiter.AlgorithmTokenBucket, limiter.AlgorithmSlidingWindow, limiter.AlgorithmFixedWindow:
 	default:
-		return fmt.Errorf("invalid ALGORITHM %q (expected token_bucket, sliding_window, or fixed_window)", c.Algorithm)
+		return fmt.Errorf("invalid ALGORITHM %q", c.Algorithm)
 	}
 
 	if c.Rate <= 0 {
@@ -81,13 +158,16 @@ func (c Config) Validate() error {
 		return fmt.Errorf("WINDOW must be > 0, got %s", c.Window)
 	}
 	if c.Burst <= 0 {
-		if c.Algorithm == limiter.AlgorithmTokenBucket {
-			return fmt.Errorf("BURST must be > 0 for token_bucket, got %d", c.Burst)
-		}
 		return fmt.Errorf("BURST must be > 0, got %d", c.Burst)
 	}
 	if strings.TrimSpace(c.Addr) == "" {
 		return fmt.Errorf("ADDR must not be empty")
+	}
+
+	switch c.StorageBackend {
+	case chronostorage.BackendMemory, chronostorage.BackendRedis, chronostorage.BackendCRDT:
+	default:
+		return fmt.Errorf("invalid STORAGE_BACKEND %q", c.StorageBackend)
 	}
 
 	return nil

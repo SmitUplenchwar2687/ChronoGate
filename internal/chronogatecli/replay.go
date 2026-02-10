@@ -12,23 +12,24 @@ import (
 
 func newReplayCmd() *cobra.Command {
 	var (
-		file      string
-		algorithm string
-		rate      int
-		window    string
-		burst     int
-		speed     float64
-		keys      string
-		endpoints string
+		file       string
+		algorithm  string
+		rate       int
+		window     string
+		burst      int
+		speed      float64
+		keys       string
+		endpoints  string
+		configPath string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "replay",
 		Short: "Replay recorded traffic through Chrono limiter algorithms",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := app.LoadConfigFromEnv()
+			cfg, err := app.LoadConfig(configPath)
 			if err != nil {
-				return fmt.Errorf("load config from env: %w", err)
+				return fmt.Errorf("load config: %w", err)
 			}
 
 			algoValue := cfg.Algorithm
@@ -53,11 +54,13 @@ func newReplayCmd() *cobra.Command {
 			}
 
 			tmp := app.Config{
-				Algorithm: algoValue,
-				Rate:      rateValue,
-				Window:    windowValue,
-				Burst:     burstValue,
-				Addr:      cfg.Addr,
+				Algorithm:      algoValue,
+				Rate:           rateValue,
+				Window:         windowValue,
+				Burst:          burstValue,
+				Addr:           cfg.Addr,
+				StorageBackend: cfg.StorageBackend,
+				Storage:        cfg.Storage,
 			}
 			if err := tmp.Validate(); err != nil {
 				return err
@@ -85,6 +88,7 @@ func newReplayCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&speed, "speed", 0, "replay speed multiplier (0 = instant)")
 	cmd.Flags().StringVar(&keys, "keys", "", "comma-separated key filter")
 	cmd.Flags().StringVar(&endpoints, "endpoints", "", "comma-separated endpoint filter")
+	cmd.Flags().StringVar(&configPath, "config", "", "path to Chrono JSON config file")
 	_ = cmd.MarkFlagRequired("file")
 
 	return cmd

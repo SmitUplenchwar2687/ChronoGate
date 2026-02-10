@@ -2,6 +2,7 @@ package chronogatecli
 
 import (
 	chronocli "github.com/SmitUplenchwar2687/Chrono/pkg/cli"
+	"github.com/SmitUplenchwar2687/ChronoGate/internal/app"
 	"github.com/spf13/cobra"
 )
 
@@ -12,7 +13,7 @@ func NewRootCmd() *cobra.Command {
 		Short:        "ChronoGate API and tooling powered by the Chrono SDK",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := loadServeConfig(cmd)
+			cfg, err := app.LoadConfig("")
 			if err != nil {
 				return err
 			}
