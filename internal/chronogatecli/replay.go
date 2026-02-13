@@ -60,6 +60,7 @@ func newReplayCmd() *cobra.Command {
 				Burst:          burstValue,
 				Addr:           cfg.Addr,
 				StorageBackend: cfg.StorageBackend,
+				Storage:        cfg.Storage,
 			}
 			if err := tmp.Validate(); err != nil {
 				return err

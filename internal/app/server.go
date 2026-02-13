@@ -7,9 +7,9 @@ import (
 	"time"
 
 	chronoclock "github.com/SmitUplenchwar2687/Chrono/pkg/clock"
+	chronokv "github.com/SmitUplenchwar2687/Chrono/pkg/kvstorage"
 	"github.com/SmitUplenchwar2687/Chrono/pkg/limiter"
 	chronorecorder "github.com/SmitUplenchwar2687/Chrono/pkg/recorder"
-	chronostorage "github.com/SmitUplenchwar2687/Chrono/pkg/storage"
 )
 
 // NewHandler builds the ChronoGate HTTP handler.
@@ -22,7 +22,7 @@ func NewHandler(
 ) http.Handler {
 	recordingState := NewRecordingState(rec, true)
 	replayState := NewReplayState()
-	storageDemoStore := chronostorage.NewMemoryStorage(clk)
+	storageDemoStore := chronokv.NewMemoryStorage(clk)
 
 	if storageSet == nil {
 		storageSet = NewStorageLimiterSet(cfg, clk)

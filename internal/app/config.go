@@ -9,6 +9,7 @@ import (
 
 	chronoconfig "github.com/SmitUplenchwar2687/Chrono/pkg/config"
 	"github.com/SmitUplenchwar2687/Chrono/pkg/limiter"
+	chronostorage "github.com/SmitUplenchwar2687/Chrono/pkg/storage"
 )
 
 // Config is ChronoGate runtime configuration resolved from Chrono config file + env.
@@ -22,13 +23,8 @@ type Config struct {
 	Burst     int
 
 	StorageBackend string
+	Storage        chronostorage.Config
 }
-
-const (
-	StorageBackendMemory = "memory"
-	StorageBackendRedis  = "redis"
-	StorageBackendCRDT   = "crdt"
-)
 
 // LoadConfig resolves configuration from Chrono defaults, optional config file,
 // and environment overrides.
@@ -47,13 +43,19 @@ func LoadConfig(configPath string) (Config, error) {
 	}
 
 	cfg := Config{
-		ConfigPath:     configPath,
-		Addr:           chronoCfg.Server.Addr,
-		Algorithm:      chronoCfg.Limiter.Algorithm,
-		Rate:           chronoCfg.Limiter.Rate,
-		Window:         chronoCfg.Limiter.Window,
-		Burst:          chronoCfg.Limiter.Burst,
-		StorageBackend: StorageBackendMemory,
+		ConfigPath: configPath,
+		Addr:       chronoCfg.Server.Addr,
+		Algorithm:  chronoCfg.Limiter.Algorithm,
+		Rate:       chronoCfg.Limiter.Rate,
+		Window:     chronoCfg.Limiter.Window,
+		Burst:      chronoCfg.Limiter.Burst,
+		StorageBackend: func() string {
+			if chronoCfg.Storage.Backend == "" {
+				return chronostorage.BackendMemory
+			}
+			return chronoCfg.Storage.Backend
+		}(),
+		Storage: toStorageConfig(chronoCfg),
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("ADDR")); raw != "" {
@@ -82,6 +84,7 @@ func LoadConfig(configPath string) (Config, error) {
 
 	if raw := strings.TrimSpace(os.Getenv("STORAGE_BACKEND")); raw != "" {
 		cfg.StorageBackend = raw
+		cfg.Storage.Backend = raw
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -89,6 +92,55 @@ func LoadConfig(configPath string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func toStorageConfig(c chronoconfig.Config) chronostorage.Config {
+	backend := c.Storage.Backend
+	if backend == "" {
+		backend = chronostorage.BackendMemory
+	}
+
+	memoryCfg := &chronostorage.MemoryConfig{
+		CleanupInterval: c.Storage.Memory.CleanupInterval,
+		Algorithm:       c.Storage.Memory.Algorithm,
+		Burst:           c.Storage.Memory.Burst,
+	}
+	if memoryCfg.CleanupInterval <= 0 {
+		memoryCfg.CleanupInterval = time.Minute
+	}
+
+	redisCfg := &chronostorage.RedisConfig{
+		Host:         c.Storage.Redis.Host,
+		Port:         c.Storage.Redis.Port,
+		Password:     c.Storage.Redis.Password,
+		DB:           c.Storage.Redis.DB,
+		Cluster:      c.Storage.Redis.Cluster,
+		ClusterNodes: append([]string(nil), c.Storage.Redis.ClusterNodes...),
+		PoolSize:     c.Storage.Redis.PoolSize,
+		MaxRetries:   c.Storage.Redis.MaxRetries,
+		DialTimeout:  c.Storage.Redis.DialTimeout,
+	}
+
+	crdtCfg := &chronostorage.CRDTConfig{
+		NodeID:         c.Storage.CRDT.NodeID,
+		BindAddr:       c.Storage.CRDT.BindAddr,
+		Peers:          append([]string(nil), c.Storage.CRDT.Peers...),
+		GossipInterval: c.Storage.CRDT.GossipInterval,
+	}
+
+	if crdtCfg.NodeID == "" {
+		crdtCfg.NodeID = "chronogate-crdt"
+	}
+	if crdtCfg.BindAddr == "" {
+		crdtCfg.BindAddr = "127.0.0.1:0"
+	}
+
+	return chronostorage.Config{
+		Backend: backend,
+		Memory:  memoryCfg,
+		Redis:   redisCfg,
+		CRDT:    crdtCfg,
+	}
 }
 
 // Validate checks app-level configuration.
@@ -113,9 +165,15 @@ func (c Config) Validate() error {
 	}
 
 	switch c.StorageBackend {
-	case StorageBackendMemory, StorageBackendRedis, StorageBackendCRDT:
+	case chronostorage.BackendMemory, chronostorage.BackendRedis, chronostorage.BackendCRDT:
 	default:
 		return fmt.Errorf("invalid STORAGE_BACKEND %q", c.StorageBackend)
+	}
+
+	// Redis and CRDT storage implementations are sliding-window only.
+	if (c.StorageBackend == chronostorage.BackendRedis || c.StorageBackend == chronostorage.BackendCRDT) &&
+		c.Algorithm != limiter.AlgorithmSlidingWindow {
+		return fmt.Errorf("algorithm %q is unsupported with %s backend; use %q", c.Algorithm, c.StorageBackend, limiter.AlgorithmSlidingWindow)
 	}
 
 	return nil
