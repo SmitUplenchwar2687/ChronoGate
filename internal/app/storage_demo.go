@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	chronokv "github.com/SmitUplenchwar2687/Chrono/pkg/kvstorage"
+	chronostorage "github.com/SmitUplenchwar2687/Chrono/pkg/storage"
 )
 
 type storageWriteRequest struct {
@@ -22,7 +22,7 @@ type storageIncrementRequest struct {
 	TTL   string `json:"ttl"`
 }
 
-func storageDemoHandler(store chronokv.Storage) http.HandlerFunc {
+func storageDemoHandler(store chronostorage.Storage) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -41,7 +41,7 @@ func storageDemoHandler(store chronokv.Storage) http.HandlerFunc {
 	}
 }
 
-func handleStorageRead(w http.ResponseWriter, r *http.Request, store chronokv.Storage) {
+func handleStorageRead(w http.ResponseWriter, r *http.Request, store chronostorage.Storage) {
 	key := strings.TrimSpace(r.URL.Query().Get("key"))
 	if key == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -72,7 +72,7 @@ func handleStorageRead(w http.ResponseWriter, r *http.Request, store chronokv.St
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func handleStorageWrite(w http.ResponseWriter, r *http.Request, store chronokv.Storage) {
+func handleStorageWrite(w http.ResponseWriter, r *http.Request, store chronostorage.Storage) {
 	var req storageWriteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -116,7 +116,7 @@ func handleStorageWrite(w http.ResponseWriter, r *http.Request, store chronokv.S
 	})
 }
 
-func handleStorageIncrement(w http.ResponseWriter, r *http.Request, store chronokv.Storage) {
+func handleStorageIncrement(w http.ResponseWriter, r *http.Request, store chronostorage.Storage) {
 	var req storageIncrementRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{

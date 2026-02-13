@@ -2,10 +2,10 @@ package app
 
 import (
 	"fmt"
+	"io"
 
 	chronoclock "github.com/SmitUplenchwar2687/Chrono/pkg/clock"
 	"github.com/SmitUplenchwar2687/Chrono/pkg/limiter"
-	chronostorage "github.com/SmitUplenchwar2687/Chrono/pkg/storage"
 )
 
 // NewLimiter builds a direct limiter implementation by algorithm.
@@ -22,40 +22,18 @@ func NewLimiter(cfg Config, clk chronoclock.Clock) (limiter.Limiter, error) {
 	}
 }
 
-// NewStorageBackedLimiter builds a main limiter using Chrono storage factory + StorageLimiter.
-func NewStorageBackedLimiter(cfg Config, clk chronoclock.Clock) (limiter.Limiter, chronostorage.Storage, error) {
-	storageCfg := cfg.Storage
-	storageCfg.Backend = cfg.StorageBackend
-	injectClockIntoStorageConfig(&storageCfg, clk)
-
-	backend, err := chronostorage.NewStorage(storageCfg)
+// NewStorageBackedLimiter builds the main limiter.
+// The published Chrono SDK version used by this project does not yet expose
+// storage-backed limiter constructors, so this returns an algorithm limiter plus
+// a no-op closer for call-site compatibility.
+func NewStorageBackedLimiter(cfg Config, clk chronoclock.Clock) (limiter.Limiter, io.Closer, error) {
+	lim, err := NewLimiter(cfg, clk)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create storage backend %q: %w", storageCfg.Backend, err)
+		return nil, nil, err
 	}
-
-	lim, err := limiter.NewStorageLimiter(backend, cfg.Rate, cfg.Window, clk)
-	if err != nil {
-		_ = backend.Close()
-		return nil, nil, fmt.Errorf("create storage limiter: %w", err)
-	}
-
-	return lim, backend, nil
+	return lim, noopCloser{}, nil
 }
 
-func injectClockIntoStorageConfig(cfg *chronostorage.Config, clk chronoclock.Clock) {
-	if cfg == nil {
-		return
-	}
-	if cfg.Memory != nil {
-		cfg.Memory.Clock = clk
-		if cfg.Memory.Algorithm == "" {
-			cfg.Memory.Algorithm = chronostorage.AlgorithmFixedWindow
-		}
-	}
-	if cfg.Redis != nil {
-		cfg.Redis.Clock = clk
-	}
-	if cfg.CRDT != nil {
-		cfg.CRDT.Clock = clk
-	}
-}
+type noopCloser struct{}
+
+func (noopCloser) Close() error { return nil }

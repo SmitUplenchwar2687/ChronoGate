@@ -15,14 +15,14 @@ import (
 )
 
 // RecordingMiddleware records request traffic using Chrono's recorder package.
-func RecordingMiddleware(rec *chronorecorder.Recorder, clk chronoclock.Clock) func(http.Handler) http.Handler {
-	if rec == nil {
-		return func(next http.Handler) http.Handler { return next }
+func RecordingMiddleware(state *RecordingState, clk chronoclock.Clock) func(http.Handler) http.Handler {
+	if state == nil {
+		state = NewRecordingState(nil, true)
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if err := rec.Record(chronorecorder.TrafficRecord{
+			if err := state.Record(chronorecorder.TrafficRecord{
 				Timestamp: clk.Now(),
 				Key:       clientKeyFromRequest(r),
 				Endpoint:  r.Method + " " + r.URL.Path,

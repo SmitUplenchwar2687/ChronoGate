@@ -13,7 +13,6 @@ import (
 	chronoclock "github.com/SmitUplenchwar2687/Chrono/pkg/clock"
 	"github.com/SmitUplenchwar2687/Chrono/pkg/limiter"
 	chronorecorder "github.com/SmitUplenchwar2687/Chrono/pkg/recorder"
-	chronostorage "github.com/SmitUplenchwar2687/Chrono/pkg/storage"
 )
 
 func TestRateLimitedRoutesAcrossAlgorithms(t *testing.T) {
@@ -141,41 +140,22 @@ func mustTestConfig(algorithm limiter.Algorithm) Config {
 		Rate:           2,
 		Window:         time.Minute,
 		Burst:          2,
-		StorageBackend: chronostorage.BackendMemory,
-		Storage: chronostorage.Config{
-			Backend: chronostorage.BackendMemory,
-			Memory: &chronostorage.MemoryConfig{
-				CleanupInterval: time.Minute,
-				Algorithm:       string(algorithm),
-				Burst:           2,
-			},
-		},
+		StorageBackend: StorageBackendMemory,
 	}
 }
 
 func newMemoryOnlyStorageSet(t *testing.T, cfg Config, clk chronoclock.Clock) (*StorageLimiterSet, func()) {
 	t.Helper()
 
-	memoryCfg := cfg.Storage
-	memoryCfg.Backend = chronostorage.BackendMemory
-	injectClockIntoStorageConfig(&memoryCfg, clk)
-
-	memStore, err := chronostorage.NewStorage(memoryCfg)
+	memLimiter, err := NewLimiter(cfg, clk)
 	if err != nil {
-		t.Fatalf("NewStorage(memory) error = %v", err)
-	}
-
-	memLimiter, err := limiter.NewStorageLimiter(memStore, cfg.Rate, cfg.Window, clk)
-	if err != nil {
-		_ = memStore.Close()
-		t.Fatalf("NewStorageLimiter(memory) error = %v", err)
+		t.Fatalf("NewLimiter(memory) error = %v", err)
 	}
 
 	set := &StorageLimiterSet{
-		Memory:      memLimiter,
-		memoryStore: memStore,
-		RedisErr:    fmt.Errorf("redis not configured in test"),
-		CRDTErr:     fmt.Errorf("crdt not configured in test"),
+		Memory:   memLimiter,
+		RedisErr: fmt.Errorf("redis backend unavailable in test"),
+		CRDTErr:  fmt.Errorf("crdt backend unavailable in test"),
 	}
 	return set, func() { _ = set.Close() }
 }

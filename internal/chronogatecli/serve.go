@@ -62,7 +62,6 @@ func newServeCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("storage-backend") {
 				cfg.StorageBackend = strings.TrimSpace(storage)
-				cfg.Storage.Backend = cfg.StorageBackend
 			}
 			if cmd.Flags().Changed("config") {
 				cfg.ConfigPath = strings.TrimSpace(configPath)

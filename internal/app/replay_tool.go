@@ -27,7 +27,7 @@ type ReplayOptions struct {
 	Endpoints []string
 }
 
-// RunReplay loads recorded traffic, replays it through the selected limiter,
+// RunReplay loads recorded traffic from file, replays it through the selected limiter,
 // and prints summary stats.
 func RunReplay(ctx context.Context, opts ReplayOptions, out io.Writer) (*chronoreplay.Summary, error) {
 	if strings.TrimSpace(opts.File) == "" {
@@ -44,21 +44,29 @@ func RunReplay(ctx context.Context, opts ReplayOptions, out io.Writer) (*chronor
 	if err != nil {
 		return nil, fmt.Errorf("load records: %w", err)
 	}
+
+	return RunReplayRecords(ctx, records, opts, out)
+}
+
+// RunReplayRecords replays in-memory traffic records and prints summary stats.
+func RunReplayRecords(ctx context.Context, records []chronorecorder.TrafficRecord, opts ReplayOptions, out io.Writer) (*chronoreplay.Summary, error) {
 	if len(records) == 0 {
-		return nil, fmt.Errorf("no records in file")
+		return nil, fmt.Errorf("no records provided")
 	}
 
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].Timestamp.Before(records[j].Timestamp)
+	sorted := append([]chronorecorder.TrafficRecord(nil), records...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Timestamp.Before(sorted[j].Timestamp)
 	})
 
-	vc := chronoclock.NewVirtualClock(records[0].Timestamp)
+	vc := chronoclock.NewVirtualClock(sorted[0].Timestamp)
 	lim, err := NewLimiter(Config{
-		Algorithm: opts.Algorithm,
-		Rate:      opts.Rate,
-		Window:    opts.Window,
-		Burst:     opts.Burst,
-		Addr:      ":0",
+		Algorithm:      opts.Algorithm,
+		Rate:           opts.Rate,
+		Window:         opts.Window,
+		Burst:          opts.Burst,
+		Addr:           ":0",
+		StorageBackend: "memory",
 	}, vc)
 	if err != nil {
 		return nil, fmt.Errorf("create limiter: %w", err)
@@ -68,7 +76,7 @@ func RunReplay(ctx context.Context, opts ReplayOptions, out io.Writer) (*chronor
 		Keys:      opts.Keys,
 		Endpoints: opts.Endpoints,
 	})
-	replayer.LoadRecords(records)
+	replayer.LoadRecords(sorted)
 
 	summary, err := replayer.Run(ctx, nil)
 	if err != nil {
@@ -90,7 +98,6 @@ func RunReplay(ctx context.Context, opts ReplayOptions, out io.Writer) (*chronor
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-
 	for _, key := range keys {
 		ks := summary.PerKey[key]
 		fmt.Fprintf(out, "  %s: allowed=%d denied=%d\n", key, ks.Allowed, ks.Denied)
